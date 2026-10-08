@@ -1,44 +1,26 @@
 package com.edoms.inventory.service;
 
-import com.edoms.inventory.dto.OrderCreatedEvent;
+import com.edoms.inventory.dto.*;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.extern.slf4j.Slf4j;
+import lombok.RequiredArgsConstructor;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Service;
 
-/**
- * Service class for consuming events from Kafka topics.
- * Listens to order events and triggers inventory reservation.
- */
 @Service
-@Slf4j
+@RequiredArgsConstructor
 public class KafkaConsumerService {
-
-    private final InventoryService inventoryService;
+    private final InventoryService service;
     private final ObjectMapper objectMapper;
 
-    public KafkaConsumerService(InventoryService inventoryService, ObjectMapper objectMapper) {
-        this.inventoryService = inventoryService;
-        this.objectMapper = objectMapper;
-    }
-
-    /**
-     * Listens to order-events topic and processes order created events.
-     * Triggers inventory reservation for new orders.
-     * 
-     * @param message the order event message
-     */
-    @KafkaListener(topics = "order-events", groupId = "${spring.kafka.consumer.group-id}")
-    public void consumeOrderEvent(String message) {
-        try {
-            log.info("Received order event: {}", message);
-            OrderCreatedEvent event = objectMapper.readValue(message, OrderCreatedEvent.class);
-            
-            inventoryService.reserveInventory(event);
-            
-            log.info("Successfully processed order event for Order ID={}", event.getOrderId());
-        } catch (Exception e) {
-            log.error("Error processing order event: {}", e.getMessage(), e);
+    @KafkaListener(topics = "order-events")
+    public void consumeOrderEvent(String message) throws JsonProcessingException {
+        OrderCreatedEvent event = objectMapper.readValue(message, OrderCreatedEvent.class);
+        OrderEventValidation.validate(event);
+        if ("ORDER_CANCELLED".equals(event.getEventType())) {
+            service.releaseInventory(event);
+        } else {
+            service.reserveInventory(event);
         }
     }
 }

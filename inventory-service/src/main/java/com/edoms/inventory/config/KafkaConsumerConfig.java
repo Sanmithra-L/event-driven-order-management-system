@@ -1,71 +1,35 @@
 package com.edoms.inventory.config;
 
-import org.apache.kafka.clients.consumer.ConsumerConfig;
-import org.apache.kafka.common.serialization.StringDeserializer;
-import org.springframework.beans.factory.annotation.Value;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.kafka.annotation.EnableKafka;
-import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
-import org.springframework.kafka.core.ConsumerFactory;
-import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
-import org.springframework.kafka.support.serializer.ErrorHandlingDeserializer;
-import org.springframework.kafka.support.serializer.JsonDeserializer;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.listener.DefaultErrorHandler;
+import org.springframework.util.backoff.FixedBackOff;
 
-import java.util.HashMap;
-import java.util.Map;
-
-/**
- * Kafka consumer configuration for receiving order events.
- * Configures consumer factory and listener container factory with JSON deserialization.
- */
-@EnableKafka
 @Configuration
 public class KafkaConsumerConfig {
-
-    @Value("${spring.kafka.bootstrap-servers}")
-    private String bootstrapServers;
-
-    @Value("${spring.kafka.consumer.group-id}")
-    private String groupId;
-
-    /**
-     * Configures the Kafka consumer properties.
-     * 
-     * @return Map of consumer configuration properties
-     */
-    private Map<String, Object> consumerConfigs() {
-        Map<String, Object> props = new HashMap<>();
-        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
-        props.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
-        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
-        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ErrorHandlingDeserializer.class);
-        props.put(ErrorHandlingDeserializer.VALUE_DESERIALIZER_CLASS, JsonDeserializer.class.getName());
-        props.put(JsonDeserializer.TRUSTED_PACKAGES, "*");
-        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-        return props;
-    }
-
-    /**
-     * Creates a ConsumerFactory for consuming events.
-     * 
-     * @return ConsumerFactory configured for event objects
-     */
     @Bean
-    public ConsumerFactory<String, Object> consumerFactory() {
-        return new DefaultKafkaConsumerFactory<>(consumerConfigs());
-    }
-
-    /**
-     * Creates a ConcurrentKafkaListenerContainerFactory for Kafka listeners.
-     * 
-     * @return KafkaListenerContainerFactory configured for concurrent consumption
-     */
-    @Bean
-    public ConcurrentKafkaListenerContainerFactory<String, Object> kafkaListenerContainerFactory() {
-        ConcurrentKafkaListenerContainerFactory<String, Object> factory = 
-                new ConcurrentKafkaListenerContainerFactory<>();
-        factory.setConsumerFactory(consumerFactory());
-        return factory;
+    public DefaultErrorHandler kafkaErrorHandler(KafkaTemplate<String, Object> kafkaTemplate) {
+        // Retry infrastructure failures without acknowledging the failed record.
+        // Invalid input is retained in a dead-letter envelope for operator inspection.
+        DefaultErrorHandler handler = new DefaultErrorHandler((record, exception) -> {
+            try {
+                kafkaTemplate.send(record.topic() + ".DLT",
+                        record.key() == null ? null : record.key().toString(),
+                        Map.of("payload", record.value() == null ? "" : record.value(),
+                               "error", exception.toString()))
+                        .get(10, TimeUnit.SECONDS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Dead-letter publishing interrupted", interrupted);
+            } catch (Exception failed) {
+                throw new IllegalStateException("Dead-letter publishing failed", failed);
+            }
+        }, new FixedBackOff(1000L, FixedBackOff.UNLIMITED_ATTEMPTS));
+        handler.addNotRetryableExceptions(JsonProcessingException.class, IllegalArgumentException.class);
+        return handler;
     }
 }

@@ -6,6 +6,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.io.Serializable;
+import java.math.BigDecimal;
 
 /**
  * Event DTO received when an order is created.
@@ -20,7 +21,7 @@ public class OrderCreatedEvent implements Serializable {
     private Long orderId;
     private String productName;
     private int quantity;
-    private double price;
+    private BigDecimal price;
     private String status;
     
     @Builder.Default

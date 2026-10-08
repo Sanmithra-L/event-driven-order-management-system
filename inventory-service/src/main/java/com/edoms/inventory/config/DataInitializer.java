@@ -2,7 +2,8 @@ package com.edoms.inventory.config;
 
 import com.edoms.inventory.service.InventoryService;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.boot.CommandLineRunner;
+import org.springframework.beans.factory.SmartInitializingSingleton;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 /**
@@ -10,7 +11,8 @@ import org.springframework.stereotype.Component;
  */
 @Component
 @Slf4j
-public class DataInitializer implements CommandLineRunner {
+@ConditionalOnProperty(name = "edoms.inventory.seed-data", havingValue = "true", matchIfMissing = true)
+public class DataInitializer implements SmartInitializingSingleton {
 
     private final InventoryService inventoryService;
 
@@ -19,7 +21,7 @@ public class DataInitializer implements CommandLineRunner {
     }
 
     @Override
-    public void run(String... args) {
+    public void afterSingletonsInstantiated() {
         log.info("Initializing inventory data...");
         inventoryService.initializeInventory();
     }

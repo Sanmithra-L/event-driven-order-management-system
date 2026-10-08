@@ -1,6 +1,8 @@
 package com.edoms.payment.model;
 
 import jakarta.persistence.Entity;
+import jakarta.persistence.Column;
+import java.math.BigDecimal;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
@@ -28,9 +30,11 @@ public class Payment {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
     
+    @Column(nullable = false, unique = true)
     private Long orderId;
     
-    private double amount;
+    @Column(nullable = false, precision = 14, scale = 2)
+    private BigDecimal amount;
     
     @Enumerated(EnumType.STRING)
     private PaymentStatus paymentStatus;
