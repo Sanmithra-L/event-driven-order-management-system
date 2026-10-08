@@ -6,6 +6,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.io.Serializable;
+import java.math.BigDecimal;
 
 /**
  * Event DTO published by payment-service after processing payment.
@@ -21,7 +22,7 @@ public class PaymentProcessedEvent implements Serializable {
     private Long paymentId;
     private boolean paymentSuccessful;
     private String paymentStatus; // SUCCESS, FAILED
-    private double amount;
+    private BigDecimal amount;
     
     @Builder.Default
     private String eventType = "PAYMENT_PROCESSED";

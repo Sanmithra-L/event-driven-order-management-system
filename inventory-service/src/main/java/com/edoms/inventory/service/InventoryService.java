@@ -1,149 +1,75 @@
 package com.edoms.inventory.service;
 
-import com.edoms.inventory.dto.InventoryUpdatedEvent;
-import com.edoms.inventory.dto.OrderCreatedEvent;
-import com.edoms.inventory.model.Inventory;
-import com.edoms.inventory.repository.InventoryRepository;
-import lombok.extern.slf4j.Slf4j;
+import com.edoms.inventory.dto.*;
+import com.edoms.inventory.model.*;
+import com.edoms.inventory.repository.*;
+import jakarta.persistence.EntityManager;
+import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.util.Optional;
-
-/**
- * Service class for inventory management business logic.
- * Handles inventory reservation/release and event publishing.
- */
 @Service
-@Slf4j
+@RequiredArgsConstructor
 public class InventoryService {
-
     private final InventoryRepository inventoryRepository;
+    private final ReservationRepository reservationRepository;
     private final KafkaProducerService kafkaProducerService;
+    private final EntityManager entityManager;
 
-    public InventoryService(InventoryRepository inventoryRepository, KafkaProducerService kafkaProducerService) {
-        this.inventoryRepository = inventoryRepository;
-        this.kafkaProducerService = kafkaProducerService;
-    }
-
-    /**
-     * Reserves inventory for an order.
-     * Checks availability and updates stock, then publishes result to Kafka.
-     * 
-     * @param orderEvent the order created event
-     */
     @Transactional
-    public void reserveInventory(OrderCreatedEvent orderEvent) {
-        log.info("Reserving inventory for Order ID={}, Product={}, Quantity={}", 
-                orderEvent.getOrderId(), orderEvent.getProductName(), orderEvent.getQuantity());
-        
-        Optional<Inventory> inventoryOpt = inventoryRepository.findByProductName(orderEvent.getProductName());
-        
-        boolean inventoryAvailable = false;
-        String inventoryStatus = "INSUFFICIENT";
-        
-        if (inventoryOpt.isPresent()) {
-            Inventory inventory = inventoryOpt.get();
-            
-            if (inventory.getAvailableStock() >= orderEvent.getQuantity()) {
-                // Sufficient stock available - reserve it
-                inventory.setAvailableStock(inventory.getAvailableStock() - orderEvent.getQuantity());
-                inventory.setReservedStock(inventory.getReservedStock() + orderEvent.getQuantity());
+    public void reserveInventory(OrderCreatedEvent event) {
+        OrderEventValidation.validate(event);
+        if (reservationRepository.findLockedByOrderId(event.getOrderId()).isPresent()) return;
+        Reservation reservation = Reservation.builder().orderId(event.getOrderId())
+                .productName(event.getProductName()).quantity(event.getQuantity())
+                .status(ReservationStatus.INSUFFICIENT).build();
+        // Persist, rather than merge an assigned ID, so simultaneous duplicates
+        // cannot overwrite an existing reservation after stock is deducted.
+        entityManager.persist(reservation);
+        entityManager.flush();
+        inventoryRepository.findByProductName(event.getProductName()).ifPresent(inventory -> {
+            if (inventory.getAvailableStock() >= event.getQuantity()) {
+                inventory.setAvailableStock(inventory.getAvailableStock() - event.getQuantity());
+                inventory.setReservedStock(inventory.getReservedStock() + event.getQuantity());
+                reservation.setStatus(ReservationStatus.RESERVED);
                 inventoryRepository.save(inventory);
-                
-                inventoryAvailable = true;
-                inventoryStatus = "RESERVED";
-                
-                log.info("Inventory reserved for Order ID={}, Product={}, Quantity={}, Remaining stock={}", 
-                        orderEvent.getOrderId(), orderEvent.getProductName(), 
-                        orderEvent.getQuantity(), inventory.getAvailableStock());
-            } else {
-                log.warn("Insufficient inventory for Order ID={}, Product={}, Required={}, Available={}", 
-                        orderEvent.getOrderId(), orderEvent.getProductName(), 
-                        orderEvent.getQuantity(), inventory.getAvailableStock());
             }
-        } else {
-            log.warn("Product not found in inventory: {}", orderEvent.getProductName());
-        }
-        
-        // Publish InventoryUpdatedEvent
-        InventoryUpdatedEvent event = InventoryUpdatedEvent.builder()
-                .orderId(orderEvent.getOrderId())
-                .productName(orderEvent.getProductName())
-                .quantity(orderEvent.getQuantity())
-                .inventoryAvailable(inventoryAvailable)
-                .inventoryStatus(inventoryStatus)
-                .build();
-        
-        kafkaProducerService.sendInventoryUpdatedEvent(event);
+        });
+        kafkaProducerService.sendInventoryUpdatedEvent(InventoryUpdatedEvent.builder()
+                .orderId(event.getOrderId()).productName(event.getProductName()).quantity(event.getQuantity())
+                .inventoryAvailable(reservation.getStatus() == ReservationStatus.RESERVED)
+                .inventoryStatus(reservation.getStatus().name()).build());
     }
 
-    /**
-     * Releases reserved inventory (compensation action for failed orders).
-     * 
-     * @param orderEvent the order event for which to release inventory
-     */
     @Transactional
-    public void releaseInventory(OrderCreatedEvent orderEvent) {
-        log.info("Releasing inventory for Order ID={}, Product={}, Quantity={}", 
-                orderEvent.getOrderId(), orderEvent.getProductName(), orderEvent.getQuantity());
-        
-        Optional<Inventory> inventoryOpt = inventoryRepository.findByProductName(orderEvent.getProductName());
-        
-        if (inventoryOpt.isPresent()) {
-            Inventory inventory = inventoryOpt.get();
-            
-            // Release reserved stock back to available
-            inventory.setAvailableStock(inventory.getAvailableStock() + orderEvent.getQuantity());
-            inventory.setReservedStock(Math.max(0, inventory.getReservedStock() - orderEvent.getQuantity()));
-            inventoryRepository.save(inventory);
-            
-            log.info("Inventory released for Order ID={}, Product={}, Quantity={}", 
-                    orderEvent.getOrderId(), orderEvent.getProductName(), orderEvent.getQuantity());
-            
-            // Publish event
-            InventoryUpdatedEvent event = InventoryUpdatedEvent.builder()
-                    .orderId(orderEvent.getOrderId())
-                    .productName(orderEvent.getProductName())
-                    .quantity(orderEvent.getQuantity())
-                    .inventoryAvailable(true)
-                    .inventoryStatus("RELEASED")
-                    .build();
-            
-            kafkaProducerService.sendInventoryUpdatedEvent(event);
-        } else {
-            log.warn("Product not found in inventory for release: {}", orderEvent.getProductName());
+    public void releaseInventory(OrderCreatedEvent event) {
+        OrderEventValidation.validate(event);
+        Reservation reservation = reservationRepository.findLockedByOrderId(event.getOrderId()).orElse(null);
+        if (reservation == null) {
+            // Retain a cancellation even if it arrives before creation.
+            entityManager.persist(Reservation.builder().orderId(event.getOrderId())
+                    .productName(event.getProductName()).quantity(event.getQuantity())
+                    .status(ReservationStatus.RELEASED).build());
+            return;
         }
+        if (reservation.getStatus() != ReservationStatus.RESERVED) return;
+        Inventory inventory = inventoryRepository.findByProductName(reservation.getProductName())
+                .orElseThrow(() -> new IllegalStateException("Reserved product is missing"));
+        if (inventory.getReservedStock() < reservation.getQuantity()) {
+            throw new IllegalStateException("Reserved stock is inconsistent");
+        }
+        inventory.setAvailableStock(inventory.getAvailableStock() + reservation.getQuantity());
+        inventory.setReservedStock(inventory.getReservedStock() - reservation.getQuantity());
+        reservation.setStatus(ReservationStatus.RELEASED);
+        inventoryRepository.save(inventory);
     }
 
-    /**
-     * Initializes sample inventory data.
-     * In production, this would be loaded from database or admin interface.
-     */
     @Transactional
     public void initializeInventory() {
         if (inventoryRepository.count() == 0) {
-            log.info("Initializing sample inventory data...");
-            
-            inventoryRepository.save(Inventory.builder()
-                    .productName("Laptop")
-                    .availableStock(50)
-                    .reservedStock(0)
-                    .build());
-            
-            inventoryRepository.save(Inventory.builder()
-                    .productName("Mouse")
-                    .availableStock(100)
-                    .reservedStock(0)
-                    .build());
-            
-            inventoryRepository.save(Inventory.builder()
-                    .productName("Keyboard")
-                    .availableStock(75)
-                    .reservedStock(0)
-                    .build());
-            
-            log.info("Sample inventory data initialized");
+            inventoryRepository.save(Inventory.builder().productName("Laptop").availableStock(50).build());
+            inventoryRepository.save(Inventory.builder().productName("Mouse").availableStock(100).build());
+            inventoryRepository.save(Inventory.builder().productName("Keyboard").availableStock(75).build());
         }
     }
 }

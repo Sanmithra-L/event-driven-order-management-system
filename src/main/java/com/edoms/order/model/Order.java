@@ -1,6 +1,9 @@
 package com.edoms.order.model;
 
 import jakarta.persistence.Entity;
+import jakarta.persistence.Column;
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import java.math.BigDecimal;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
@@ -32,7 +35,14 @@ public class Order {
     
     private int quantity;
     
-    private double price;
+    @Column(nullable = false, precision = 14, scale = 2)
+    private BigDecimal price;
+
+    @JsonIgnore
+    private Boolean paymentSuccessful;
+
+    @JsonIgnore
+    private Boolean inventoryAvailable;
     
     @Enumerated(EnumType.STRING)
     private OrderStatus status;

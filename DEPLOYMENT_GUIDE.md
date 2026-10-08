@@ -1,312 +1,64 @@
-# Event-Driven Order Management System - Deployment Guide
+# Local deployment
 
-## Prerequisites
+Requirements: Java 21, Maven wrapper (included) or Maven, and Docker Compose.
 
-- **Java 21** or higher
-- **Maven 3.6+**
-- **Docker** and **Docker Compose**
-- **Git**
-
-## Quick Start (Local Development)
-
-### Step 1: Start Infrastructure Services
-
-Start MySQL, Kafka, and Zookeeper using Docker Compose:
+From the repository root:
 
 ```bash
-docker-compose up -d
+docker compose up -d
+docker compose ps
+./mvnw verify
+./mvnw -f payment-service/pom.xml verify
+./mvnw -f inventory-service/pom.xml verify
 ```
 
-This will start:
-- MySQL (Order DB) on port **3307**
-- MySQL (Payment DB) on port **3308**
-- MySQL (Inventory DB) on port **3309**
-- Kafka on port **9092**
-- Zookeeper on port **2181**
-- Kafka UI on port **8090** (http://localhost:8090)
-
-Wait for all services to be healthy:
+Start each service in its own terminal:
 
 ```bash
-docker-compose ps
+java -jar target/order-service-0.0.1-SNAPSHOT.jar
+java -jar payment-service/target/payment-service-0.0.1-SNAPSHOT.jar
+java -jar inventory-service/target/inventory-service-0.0.1-SNAPSHOT.jar
 ```
 
-### Step 2: Build All Services
-
-```bash
-# Build order-service
-cd d:\event-driven-order-management-system
-mvnw clean install
-
-# Build payment-service
-cd payment-service
-mvnw clean install
-
-# Build inventory-service
-cd ..\inventory-service
-mvnw clean install
-```
-
-### Step 3: Run Microservices
-
-Open **3 separate terminals** and run each service:
-
-#### Terminal 1 - Order Service
-```bash
-cd d:\event-driven-order-management-system
-mvnw spring-boot:run
-```
-- **Port**: 8081
-- **Health**: http://localhost:8081/actuator/health
-
-#### Terminal 2 - Payment Service
-```bash
-cd d:\event-driven-order-management-system\payment-service
-mvnw spring-boot:run
-```
-- **Port**: 8082
-- **Health**: http://localhost:8082/actuator/health
-
-#### Terminal 3 - Inventory Service
-```bash
-cd d:\event-driven-order-management-system\inventory-service
-mvnw spring-boot:run
-```
-- **Port**: 8083
-- **Health**: http://localhost:8083/actuator/health
-
-### Step 4: Verify System is Running
-
-Check all services are healthy:
-
-```bash
-curl http://localhost:8081/actuator/health
-curl http://localhost:8082/actuator/health
-curl http://localhost:8083/actuator/health
-```
-
-Monitor Kafka topics via Kafka UI:
-- Open http://localhost:8090
-- View topics: order-events, payment-events, inventory-events
-
----
-
-## Testing the System
-
-### Create an Order (Success Scenario)
-
-```bash
-curl -X POST http://localhost:8081/orders \
-  -H "Content-Type: application/json" \
-  -d '{
-    "productName": "Laptop",
-    "quantity": 2,
-    "price": 2400.00
-  }'
-```
-
-**Expected Flow:**
-1. Order created with status `CREATED`
-2. Order event published to Kafka
-3. Payment service processes payment → `SUCCESS`
-4. Inventory service reserves stock → `RESERVED`
-5. Order status updated to `COMPLETED`
+Windows wrapper commands use `.\mvnw.cmd` from the root with the same `-f` arguments.
 
-### Create an Order (Payment Failure Scenario)
+## Configuration
 
-```bash
-curl -X POST http://localhost:8081/orders \
-  -H "Content-Type: application/json" \
-  -d '{
-    "productName": "Laptop",
-    "quantity": 1,
-    "price": 15000.00
-  }'
-```
+| Environment variable | Default |
+| --- | --- |
+| SERVER_PORT | 8081 order / 8082 payment / 8083 inventory |
+| DB_URL | jdbc:mysql://localhost:3307/orderdb, :3308/paymentdb, or :3309/inventorydb |
+| DB_USERNAME | root |
+| DB_PASSWORD | mypassword (also used by Compose for initial MySQL setup) |
+| DDL_AUTO | update |
+| KAFKA_BOOTSTRAP_SERVERS | localhost:9092 |
 
-**Expected Flow:**
-1. Order created with status `CREATED`
-2. Payment fails (amount > 10000)
-3. Order status updated to `FAILED`
+If running applications inside containers, use the relevant MySQL service name on port 3306 and `kafka:29092`. The Compose file starts infrastructure only.
 
-### Create an Order (Inventory Insufficient Scenario)
+The development setup uses plaintext Kafka and sample credentials. Authentication, authorization, TLS, managed migrations, retention policies, and a real payment provider require separate deployment work.
 
-```bash
-curl -X POST http://localhost:8081/orders \
-  -H "Content-Type: application/json" \
-  -d '{
-    "productName": "Laptop",
-    "quantity": 100,
-    "price": 5000.00
-  }'
-```
+Health endpoints are at `/actuator/health`; `info` and `metrics` are also exposed. Kafka UI runs on port 8090.
 
-**Expected Flow:**
-1. Order created with status `CREATED`
-2. Inventory insufficient (only 50 available)
-3. Order status updated to `FAILED`
+## Persistence and recovery
 
-### Retrieve an Order
+MySQL, Kafka, and ZooKeeper use named volumes. `docker compose down` preserves them. Removing volumes discards their data.
 
-```bash
-curl http://localhost:8081/orders/1
-```
+Each service has an `outbox_events` table. Pending rows remain on broker failure and are retried by the publisher, every 500 ms by default. `edoms.outbox.poll-interval-ms` changes that delay. The publisher locks a batch in ID order; consumers tolerate replay after publication succeeds but the database commit fails.
 
----
+Kafka retries transient processing errors. An unavailable database can hold up a partition; check logs and restore the dependency. Invalid events are retained in the corresponding `.DLT` topic. Correct the cause before republishing the original payload.
 
-## Database Access
+Initial demo inventory is seeded before listeners start on an empty database. Disable `edoms.inventory.seed-data` when managing your own stock or running multiple inventory instances. Use a single instance for first-time demo seeding.
 
-### MySQL Access
+## Upgrading existing data
 
-Connect to MySQL databases:
+These changes add persisted order confirmations, outbox tables, inventory reservations, unique payment order IDs, unique product names, and decimal monetary columns. Back up databases and stop old application instances before upgrading.
 
-```bash
-# Order Database
-mysql -h localhost -P 3307 -u root -pmypassword orderdb
+Before applying schema changes, reconcile duplicate `payments.order_id` and `inventory.product_name` values and review conversion of existing floating-point amounts to DECIMAL(14,2). Hibernate's development `update` mode is not a substitute for a reviewed migration.
 
-# Payment Database
-mysql -h localhost -P 3308 -u root -pmypassword paymentdb
+Previously pending orders have no recoverable in-memory confirmations, and old stock reservations have no per-order ledger. Reconcile those records against payment, inventory, and Kafka history before resuming or replaying events. Do not replay historical creation events against old balances without that reconciliation. Existing terminal orders are preserved; historical compensations are not run automatically.
 
-# Inventory Database
-mysql -h localhost -P 3309 -u root -pmypassword inventorydb
-```
+For existing non-demo environments, create and validate a migration against a database copy before setting `DDL_AUTO=validate`.
 
-### Sample Queries
+## Validation limits
 
-```sql
--- View orders
-USE orderdb;
-SELECT * FROM orders;
-
--- View payments
-USE paymentdb;
-SELECT * FROM payments;
-
--- View inventory
-USE inventorydb;
-SELECT * FROM inventory;
-```
-
----
-
-## Monitoring
-
-### Actuator Endpoints
-
-Each service exposes actuator endpoints:
-
-- **Health**: `/actuator/health`
-- **Info**: `/actuator/info`
-- **Metrics**: `/actuator/metrics`
-
-### Kafka Monitoring
-
-Access Kafka UI at http://localhost:8090 to:
-- View topics and messages
-- Monitor consumer lag
-- Inspect message contents
-
----
-
-## Troubleshooting
-
-### Service Won't Start
-
-**Issue**: Port already in use
-
-```bash
-# Windows: Find and kill process
-netstat -ano | findstr :8081
-taskkill /PID <process_id> /F
-```
-
-**Issue**: Database connection failed
-
-```bash
-# Check MySQL is running
-docker-compose ps mysql-order
-
-# Restart MySQL
-docker-compose restart mysql-order
-```
-
-### Kafka Issues
-
-**Issue**: Kafka not ready
-
-```bash
-# Check Kafka health
-docker-compose logs kafka
-
-# Restart Kafka and Zookeeper
-docker-compose restart zookeeper kafka
-```
-
-### Messages Not Being Consumed
-
-1. Check Kafka UI for messages in topics
-2. Verify consumer groups are active
-3. Check service logs for errors
-4. Ensure all services are running
-
----
-
-## Stopping the System
-
-### Stop Microservices
-Press `Ctrl+C` in each terminal running the services.
-
-### Stop Infrastructure
-```bash
-docker-compose down
-```
-
-### Clean Up (Remove Data)
-```bash
-docker-compose down -v
-```
-
----
-
-## Production Deployment Considerations
-
-### Environment Variables
-
-Create `.env` file for production:
-
-```env
-DB_USERNAME=prod_user
-DB_PASSWORD=<secure_password>
-KAFKA_BOOTSTRAP_SERVERS=kafka.production.com:9092
-```
-
-### Security
-
-- Use **secrets management** (AWS Secrets Manager, HashiCorp Vault)
-- Enable **SSL/TLS** for Kafka
-- Configure **database encryption**
-- Implement **API authentication** (JWT, OAuth2)
-
-### Scaling
-
-- Run multiple instances of each service
-- Configure Kafka **consumer groups** properly
-- Use **load balancers** for API endpoints
-- Implement **database connection pooling**
-
-### Observability
-
-- Integrate with **Prometheus** for metrics
-- Use **Grafana** for dashboards
-- Implement **distributed tracing** (Zipkin, Jaeger)
-- Centralized logging (**ELK Stack**, **Splunk**)
-
----
-
-## Next Steps
-
-- Implement API Gateway (Spring Cloud Gateway)
-- Add service discovery (Consul, Eureka)
-- Implement authentication and authorization
-- Add comprehensive integration tests
-- Set up CI/CD pipeline
+Automated tests exercise H2 transactions, concurrency, embedded Kafka, serializers, listeners, and dead-letter publication. MySQL-specific migrations and this Compose stack must also be checked in an environment with Docker before deployment.

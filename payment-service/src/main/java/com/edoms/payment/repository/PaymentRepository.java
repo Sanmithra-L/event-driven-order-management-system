@@ -6,6 +6,8 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
 
 import java.util.List;
+import jakarta.persistence.LockModeType;
+import org.springframework.data.jpa.repository.Lock;
 import java.util.Optional;
 
 /**
@@ -21,6 +23,7 @@ public interface PaymentRepository extends JpaRepository<Payment, Long> {
      * @param orderId the order ID
      * @return Optional containing the payment if found
      */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
     Optional<Payment> findByOrderId(Long orderId);
     
     /**

@@ -1,102 +1,51 @@
 package com.edoms.payment.service;
 
-import com.edoms.payment.dto.OrderCreatedEvent;
-import com.edoms.payment.dto.PaymentProcessedEvent;
-import com.edoms.payment.model.Payment;
-import com.edoms.payment.model.PaymentStatus;
+import com.edoms.payment.dto.*;
+import com.edoms.payment.model.*;
 import com.edoms.payment.repository.PaymentRepository;
-import lombok.extern.slf4j.Slf4j;
+import java.math.BigDecimal;
+import java.util.UUID;
+import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.util.UUID;
-
-/**
- * Service class for payment processing business logic.
- * Handles payment processing and event publishing.
- */
 @Service
-@Slf4j
+@RequiredArgsConstructor
 public class PaymentService {
-
+    private static final BigDecimal PAYMENT_LIMIT = new BigDecimal("10000.00");
     private final PaymentRepository paymentRepository;
     private final KafkaProducerService kafkaProducerService;
 
-    public PaymentService(PaymentRepository paymentRepository, KafkaProducerService kafkaProducerService) {
-        this.paymentRepository = paymentRepository;
-        this.kafkaProducerService = kafkaProducerService;
-    }
-
-    /**
-     * Processes payment for an order.
-     * Simulates payment processing logic and publishes result to Kafka.
-     * 
-     * @param orderEvent the order created event
-     */
     @Transactional
-    public void processPayment(OrderCreatedEvent orderEvent) {
-        log.info("Processing payment for Order ID={}, Amount={}", 
-                orderEvent.getOrderId(), orderEvent.getPrice());
-        
-        // Create payment record
-        Payment payment = Payment.builder()
-                .orderId(orderEvent.getOrderId())
-                .amount(orderEvent.getPrice())
-                .paymentStatus(PaymentStatus.PENDING)
+    public void processPayment(OrderCreatedEvent event) {
+        OrderEventValidation.validate(event);
+        // The unique order ID also protects simultaneous first deliveries.
+        // A racing insert rolls back and Kafka retries against the saved record.
+        if (paymentRepository.findByOrderId(event.getOrderId()).isPresent()) return;
+        boolean success = event.getPrice().compareTo(PAYMENT_LIMIT) <= 0;
+        Payment payment = paymentRepository.save(Payment.builder()
+                .orderId(event.getOrderId()).amount(event.getPrice())
                 .transactionId(UUID.randomUUID().toString())
-                .build();
-        
-        Payment savedPayment = paymentRepository.save(payment);
-        log.info("Payment record created with ID={}", savedPayment.getId());
-        
-        // Simulate payment processing logic
-        boolean paymentSuccess = simulatePaymentProcessing(orderEvent.getPrice());
-        
-        // Update payment status
-        savedPayment.setPaymentStatus(paymentSuccess ? PaymentStatus.SUCCESS : PaymentStatus.FAILED);
-        paymentRepository.save(savedPayment);
-        
-        log.info("Payment processing completed for Order ID={}, Status={}", 
-                orderEvent.getOrderId(), savedPayment.getPaymentStatus());
-        
-        // Publish PaymentProcessedEvent
-        PaymentProcessedEvent event = PaymentProcessedEvent.builder()
-                .orderId(orderEvent.getOrderId())
-                .paymentId(savedPayment.getId())
-                .paymentSuccessful(paymentSuccess)
-                .paymentStatus(savedPayment.getPaymentStatus().name())
-                .amount(savedPayment.getAmount())
-                .build();
-        
-        kafkaProducerService.sendPaymentProcessedEvent(event);
+                .paymentStatus(success ? PaymentStatus.SUCCESS : PaymentStatus.FAILED).build());
+        kafkaProducerService.sendPaymentProcessedEvent(PaymentProcessedEvent.builder()
+                .orderId(event.getOrderId()).paymentId(payment.getId())
+                .amount(payment.getAmount()).paymentSuccessful(success)
+                .paymentStatus(payment.getPaymentStatus().name()).build());
     }
 
-    /**
-     * Simulates payment processing logic.
-     * In production, this would integrate with payment gateway APIs.
-     * Mock logic: Payments above 10000 fail, others succeed.
-     * 
-     * @param amount the payment amount
-     * @return true if payment successful, false otherwise
-     */
-    private boolean simulatePaymentProcessing(double amount) {
-        try {
-            // Simulate processing delay
-            Thread.sleep(1000);
-            
-            // Mock logic: fail payments above 10000
-            if (amount > 10000) {
-                log.warn("Payment amount {} exceeds limit. Payment failed.", amount);
-                return false;
-            }
-            
-            log.info("Payment processing successful for amount {}", amount);
-            return true;
-            
-        } catch (InterruptedException e) {
-            log.error("Payment processing interrupted", e);
-            Thread.currentThread().interrupt();
-            return false;
+    @Transactional
+    public void cancelPayment(OrderCreatedEvent event) {
+        OrderEventValidation.validate(event);
+        Payment payment = paymentRepository.findByOrderId(event.getOrderId()).orElseGet(() ->
+                Payment.builder().orderId(event.getOrderId()).amount(event.getPrice())
+                        .transactionId(UUID.randomUUID().toString())
+                        .paymentStatus(PaymentStatus.CANCELLED).build());
+        if (payment.getPaymentStatus() == PaymentStatus.SUCCESS) {
+            // This service simulates payments; a real gateway needs an idempotent refund API.
+            payment.setPaymentStatus(PaymentStatus.REFUNDED);
+        } else if (payment.getPaymentStatus() == PaymentStatus.PENDING) {
+            payment.setPaymentStatus(PaymentStatus.CANCELLED);
         }
+        paymentRepository.save(payment);
     }
 }
